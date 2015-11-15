@@ -25,7 +25,7 @@ android {
   * パッケージ: アプリケーションID+".layout"
   * クラス名: Layout定義名をキャメル変換してサフィックスに "Views"
 
-##### res/layout/activity_main.xml
+##### レイアウト定義：res/layout/activity_main.xml
 ~~~xml
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
              xmlns:tools="http://schemas.android.com/tools"
@@ -39,7 +39,7 @@ android {
 </FrameLayout>
 ~~~
 
-##### .../layout/ActivityMainViews.java
+##### 生成コード：.../layout/ActivityMainViews.java
 ~~~java
 package your.app.package.layout;
 import your.app.package.R;
