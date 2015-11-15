@@ -1,0 +1,115 @@
+apply plugin: GenerateLayoutClassPlugin
+tasks.preBuild.dependsOn 'generateLayoutClass';
+
+class GenerateLayoutClassPluginExtension {
+    def final String generatedSrcDir = "generated/layout/src/main/java/";
+    def String appPackage = null;
+    def String layoutSubPackage = ".layout";
+    def String classSuffix = "Views";
+    def String fieldPrefix = "m";
+}
+
+class GenerateLayoutClassPlugin implements Plugin<Project> {
+    GenerateLayoutClassPluginExtension extension;
+
+    void apply(Project project) {
+        project.extensions.create('generateLayoutClass', GenerateLayoutClassPluginExtension);
+        extension = project.generateLayoutClass;
+
+        File generatedSrcDir = new File(project.buildDir, extension.generatedSrcDir);
+        project.android {
+            sourceSets {
+                main {
+                    java {
+                        srcDirs += generatedSrcDir;
+                    }
+                }
+            }
+        }
+
+        project.task('generateLayoutClass') << {
+            if (extension.appPackage == null) extension.appPackage = project.android.defaultConfig.applicationId;
+
+            FileTree tree = project.fileTree(dir: 'src/main/res/layout');
+            tree.include('*.xml');
+            tree.each { File file ->
+                generateLayoutClass(file, generatedSrcDir);
+            }
+        }
+    }
+
+    String snake2camel(String snake, boolean isFirstUpper) {
+        StringBuilder sbuf = new StringBuilder(snake.length());
+        String[] words = snake.split('_');
+        for (String word : words) {
+            sbuf.append(Character.toUpperCase(word.charAt(0)));
+            sbuf.append(word.substring(1));
+        }
+        if (!isFirstUpper) {
+            sbuf.setCharAt(0, Character.toLowerCase(sbuf.charAt(0)));
+        }
+        return sbuf.toString();
+    }
+
+    class View {
+        String name, id, fieldName, baseName;
+
+        def View(node) {
+            this.name = node.name();
+            this.id = node.'@android:id'.toString().replaceFirst(/^.*\//, "");
+            this.baseName = snake2camel(this.id, (extension.fieldPrefix != ""));
+            this.fieldName = extension.fieldPrefix + this.baseName;
+        }
+    }
+
+    void generateLayoutClass(File xmlFile, File outDir) {
+        String appPackage = extension.appPackage;
+        String layoutPackage = appPackage + extension.layoutSubPackage;
+
+        def views = [];
+        def layout = new XmlSlurper().parse(xmlFile).declareNamespace(
+                android: 'http://schemas.android.com/apk/res/android',
+                tools: 'http://schemas.android.com/tools'
+        );
+        def isActivity = (layout.'@tools:context' != "");
+        layout.'**'.each { node ->
+            if (node.'@android:id' != "") {
+                views.add(new View(node));
+            }
+        }
+
+        int start = xmlFile.absolutePath.lastIndexOf(File.separator);
+        int end = xmlFile.absolutePath.lastIndexOf('.');
+        String className = snake2camel(xmlFile.absolutePath.substring(start + 1, end), true) + extension.classSuffix;
+
+        File parentDir = new File(outDir, layoutPackage.replace('.', '/'));
+        parentDir.mkdirs();
+        File outFile = new File(parentDir, className + ".java");
+        if (outFile.exists() && outFile.lastModified() > xmlFile.lastModified()) {
+            return;
+        }
+
+        FileWriter out = new FileWriter(outFile);
+
+        out.println("package ${layoutPackage};");
+        out.println("import ${appPackage}.R;");
+        out.println("import android.view.*;");
+        out.println("import android.widget.*;");
+        out.println("public class ${className} {");
+
+        for (def view : views) {
+            out.println("    public final ${view.name} ${view.fieldName};");
+        }
+        if (isActivity) {
+            out.println("    public ${className}(android.app.Activity root) {");
+        } else {
+            out.println("    public ${className}(View root) {");
+        }
+        for (def view : views) {
+            out.println("        this.${view.fieldName} = (${view.name}) root.findViewById(R.id.${view.id});");
+        }
+        out.println("    }");
+        out.println("}");
+        out.close();
+    }
+}
