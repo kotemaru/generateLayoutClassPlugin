@@ -3,7 +3,6 @@
   <component name="EclipseCodeFormatter">
     <option name="defaultSettings" value="true" />
     <option name="enableJSFormatting" value="true" />
-    <option name="formatter" value="ECLIPSE" />
     <option name="id" value="1443841409371" />
     <option name="name" value="default" />
     <option name="pathToConfigFileJS" value="D:/inou/java-fometter.xml" />
@@ -54,7 +53,20 @@
   <component name="ProjectType">
     <option name="id" value="Android" />
   </component>
-  <component name="SvnConfiguration">
-    <configuration>C:\Users\inou\AppData\Roaming\Subversion</configuration>
+  <component name="masterDetails">
+    <states>
+      <state key="ProjectJDKs.UI">
+        <settings>
+          <last-edited>1.7</last-edited>
+          <splitter-proportions>
+            <option name="proportions">
+              <list>
+                <option value="0.2" />
+              </list>
+            </option>
+          </splitter-proportions>
+        </settings>
+      </state>
+    </states>
   </component>
 </project>

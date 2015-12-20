@@ -1,6 +1,8 @@
 apply plugin: GenerateLayoutClassPlugin
 tasks.preBuild.dependsOn 'generateLayoutClass';
 
+import groovy.text.GStringTemplateEngine;
+
 class GenerateLayoutClassPluginExtension {
     def final String generatedSrcDir = "generated/layout/src/main/java/";
     def String appPackage = null;
@@ -38,7 +40,7 @@ class GenerateLayoutClassPlugin implements Plugin<Project> {
         }
     }
 
-    String snake2camel(String snake, boolean isFirstUpper) {
+    static String snake2camel(String snake, boolean isFirstUpper) {
         StringBuilder sbuf = new StringBuilder(snake.length());
         String[] words = snake.split('_');
         for (String word : words) {
@@ -89,27 +91,39 @@ class GenerateLayoutClassPlugin implements Plugin<Project> {
             return;
         }
 
+        def binding = [
+                layoutPackage: layoutPackage,
+                appPackage: appPackage,
+                className: className,
+                views: views,
+                isActivity:isActivity
+        ];
+        GStringTemplateEngine engine = new GStringTemplateEngine()
+        def template = engine.createTemplate(TEMPLATE).make(binding)
+
         FileWriter out = new FileWriter(outFile);
-
-        out.println("package ${layoutPackage};");
-        out.println("import ${appPackage}.R;");
-        out.println("import android.view.*;");
-        out.println("import android.widget.*;");
-        out.println("public class ${className} {");
-
-        for (def view : views) {
-            out.println("    public final ${view.name} ${view.fieldName};");
-        }
-        if (isActivity) {
-            out.println("    public ${className}(android.app.Activity root) {");
-        } else {
-            out.println("    public ${className}(View root) {");
-        }
-        for (def view : views) {
-            out.println("        this.${view.fieldName} = (${view.name}) root.findViewById(R.id.${view.id});");
-        }
-        out.println("    }");
-        out.println("}");
+        template.writeTo(out)
         out.close();
     }
+
+    def TEMPLATE = '''\
+package ${layoutPackage};
+import ${appPackage}.R;
+import android.view.*;
+import android.widget.*;
+public class ${className} {
+<% for (def view : views) { %>\
+    public final ${view.name} ${view.fieldName};
+<% } %>\
+<% if (isActivity) { %>\
+    public ${className}(android.app.Activity root) {
+<% } else { %>\
+    public ${className}(View root) {
+<% } %>\
+<% for (def view : views) { %>\
+        this.${view.fieldName} = (${view.name}) root.findViewById(R.id.${view.id});
+<% } %>\
+    }
+}
+''';
 }

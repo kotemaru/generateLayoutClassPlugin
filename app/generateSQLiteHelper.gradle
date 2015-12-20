@@ -1,0 +1,450 @@
+apply plugin: GenerateSQLiteHelperPlugin
+tasks.preBuild.dependsOn 'generateSQLiteHelper';
+
+buildscript {
+    repositories {
+        //mavenCentral()
+        jcenter()
+    }
+    dependencies {
+        classpath(group: 'org.apache.poi', name: 'poi', version: '3.13')
+        classpath(group: 'org.apache.poi', name: 'poi-ooxml', version: '3.13') {
+            exclude group: 'stax', module: 'stax-api'
+        }
+        classpath(group: 'org.apache.poi', name: 'ooxml-schemas', version: '1.1')
+    }
+}
+
+
+import groovy.text.GStringTemplateEngine
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
+import org.apache.poi.ss.usermodel.Workbook;
+
+class GenerateSQLiteHelperPluginExtension {
+    def final String generatedSrcDir = "generated/sqlite/src/main/java/";
+    def String appPackage = null;
+    def String layoutSubPackage = ".sqlite";
+    def String classSuffix = "SqlHelper";
+    def String fieldPrefix = "m";
+}
+
+class GenerateSQLiteHelperPlugin implements Plugin<Project> {
+    GenerateSQLiteHelperPluginExtension extension;
+
+    void apply(Project project) {
+        project.extensions.create('generateSQLiteHelper', GenerateSQLiteHelperPluginExtension);
+        extension = project.generateSQLiteHelper;
+
+        File generatedSrcDir = new File(project.buildDir, extension.generatedSrcDir);
+        project.android {
+            sourceSets {
+                main {
+                    java {
+                        srcDirs += generatedSrcDir;
+                    }
+                }
+            }
+        }
+
+        project.task('generateSQLiteHelper') << {
+            if (extension.appPackage == null) extension.appPackage = project.android.defaultConfig.applicationId;
+
+            FileTree tree = project.fileTree(dir: 'src/main/java');
+            tree.include('**/*.db.xlsx');
+            def dbFiles = getDbFiles(tree);
+            generateSQLiteHelpers(dbFiles, generatedSrcDir);
+        }
+    }
+
+    static String snake2camel(String snake, boolean isFirstUpper) {
+        StringBuilder sbuf = new StringBuilder(snake.length());
+        snake = snake.replaceFirst('^_', '');
+        String[] words = snake.toLowerCase().split('_');
+        println "snake="+snake
+        for (String word : words) {
+            sbuf.append(Character.toUpperCase(word.charAt(0)));
+            sbuf.append(word.substring(1));
+        }
+        if (!isFirstUpper) {
+            sbuf.setCharAt(0, Character.toLowerCase(sbuf.charAt(0)));
+        }
+        return sbuf.toString();
+    }
+
+    class TableInfo {
+        String dbFile, name, memo;
+        int version;
+        def columns = [];
+
+        TableInfo(Sheet sheet) {
+            int n = 1;
+            this.dbFile = sheet?.getRow(n++).getCell(3).getStringCellValue();
+            this.name = sheet?.getRow(n++).getCell(3).getStringCellValue();
+            this.version = (int) sheet?.getRow(n++).getCell(3).getNumericCellValue();
+            this.memo = sheet?.getRow(n++).getCell(3).getStringCellValue();
+
+            if (dbFile != null) dbFile = dbFile.trim();
+            if (name != null) name = name.trim();
+
+            n = 8;
+            for (; n < 300; ) {
+                ColumnInfo cinfo = new ColumnInfo(sheet.getRow(n++));
+                if (cinfo.name == null || cinfo.name.empty) break;
+                columns.add(cinfo);
+            }
+        }
+    }
+
+    class ColumnInfo {
+        int itemNo, ver;
+        String name, type, jtype,  pkey, notNull;
+        String constraint, memo;
+
+        ColumnInfo(Row row) {
+            if (row == null) return;
+            int n = 1;
+            this.itemNo = (int) row.getCell(n++)?.getNumericCellValue();
+            this.ver = (int) row.getCell(n++)?.getNumericCellValue();
+            this.name = row.getCell(n++)?.getStringCellValue();
+            this.type = row.getCell(n++)?.getStringCellValue();
+            this.jtype = row.getCell(n++)?.getStringCellValue();
+            this.pkey = row.getCell(n++)?.getStringCellValue();
+            this.notNull = row.getCell(n++)?.getStringCellValue();
+            this.constraint = row.getCell(n++)?.getStringCellValue();
+            this.memo = row.getCell(n++)?.getStringCellValue();
+
+            if (name != null) name = name.trim();
+            if (jtype != null) jtype = jtype.trim();
+        }
+
+        boolean isPKay() {
+            return "◯".equals(pkey);
+        }
+
+        boolean isNotNull() {
+            return "◯".equals(notNull);
+        }
+
+        String getJavaType() {
+            if (jtype != null && !jtype.empty) {
+                return jtype;
+            }
+
+            return getBindType();
+        }
+        String getBindType() {
+            if ("INTEGER".equals(type)) return "Long";
+            if ("REAL".equals(type)) return "Double";
+            if ("BLOB".equals(type)) return "byte[]";
+            return "String";
+        }
+
+        String getJavaName() {
+            return snake2camel(name, true);
+        }
+        String getMergedConstraint() {
+            StringBuilder sbuf = new StringBuilder();
+            if (isPKay()) sbuf.append('PRYMARY KEY ');
+            if (isNotNull()) sbuf.append('NOT NULL ');
+            if (constraint != null) sbuf.append(constraint);
+            return sbuf.toString();
+        }
+    }
+
+    static final String HEADER_TABLE_INFO = "テーブル情報";
+    static final String HEADER_COLUMN_INFO = "カラム情報";
+
+    def getDbFiles(FileTree tree) {
+        def dbFiles = [:];
+        tree.each { File file ->
+            new FileInputStream(file).withStream { ins ->
+                WorkbookFactory.create(ins).with { workbook ->
+                    getTableInfo(workbook, dbFiles);
+                }
+            }
+        }
+        println "======>" + dbFiles;
+        return dbFiles;
+    }
+
+    void getTableInfo(Workbook workbook, dbFiles) {
+        for (int i = 0; i < workbook.getNumberOfSheets(); i++) {
+            Sheet sheet = workbook.getSheetAt(i);
+            String header = sheet?.getRow(0)?.getCell(0)?.getStringCellValue();
+            println "======>" + header;
+            if (HEADER_TABLE_INFO.equals(header)) {
+                TableInfo info = new TableInfo(sheet);
+                println "======>info " + info.dbFile;
+                if (!dbFiles.containsKey(info.dbFile)) {
+                    dbFiles.put(info.dbFile, []);
+                }
+                def tables = dbFiles[info.dbFile];
+                println "======>tables " + tables;
+                dbFiles[info.dbFile] = tables;
+                tables.add(new TableInfo(sheet));
+            }
+            println "======>dbFiles;" + dbFiles;
+        }
+    }
+
+    void generateSQLiteHelpers(def dbFiles, File outDir) {
+        dbFiles.each { key, value ->
+            println "======>generateSQLiteHelpers:" + key;
+            generateSQLiteHelper(key, value, outDir);
+        }
+    }
+
+    void generateSQLiteHelper(String dbFileName, def tables, File outDir) {
+        String appPackage = extension.appPackage;
+        String helperPackage = appPackage + extension.layoutSubPackage;
+
+        //String className = snake2camel(dbFileName, true) + extension.classSuffix;
+
+        File parentDir = new File(outDir, helperPackage.replace('.', '/'));
+        parentDir.mkdirs();
+
+        // TODO;
+        //if (outFile.exists() && outFile.lastModified() > xmlFile.lastModified()) {
+        //    return;
+        //}
+
+        def binding = [
+                helperPackage: helperPackage,
+                appPackage   : appPackage,
+                tables       : tables
+        ];
+
+
+        for (TableInfo table : tables) {
+            String className = snake2camel(table.name, true) + "Dto";
+            binding.table = table;
+            binding.className = className;
+
+            GStringTemplateEngine engine = new GStringTemplateEngine()
+            def template = engine.createTemplate(TEMPLATE_DTO).make(binding)
+
+            File outFile = new File(parentDir, className + ".java");
+            FileWriter out = new FileWriter(outFile);
+            template.writeTo(out)
+            out.close();
+        }
+
+    }
+
+    def TEMPLATE_DTO = '''\
+package ${helperPackage};
+import java.util.Date;
+
+public class ${className} {
+<% for (def col : table.columns) { %>\
+
+    protected ${col.javaType} m${col.javaName};
+<% if ('boolean'.equals(col.getJavaType())) { %>\
+    public ${col.javaType} is${col.javaName}(){
+<% } else { %>\
+    public ${col.javaType} get${col.javaName}(){
+<% } %>\
+        return m${col.javaName};
+    }
+    public void set${col.javaName}(${col.javaType} p${col.javaName}) {
+        this.m${col.javaName} = p${col.javaName};
+    }
+    public void bind${col.javaName}(SQLiteStatement st, int index) {
+<% if ('boolean'.equals(col.getJavaType())) { %>\
+        st.bind${col.bindType}(index, is${col.javaName}() ? 1L : 0L);
+<% } else if ('int'.equals(col.getJavaType())) { %>\
+        st.bind${col.bindType}(index, (long)get${col.javaName}());
+<% } else if ('float'.equals(col.getJavaType())) { %>\
+        st.bind${col.bindType}(index, (double)get${col.javaName}());
+<% } else if ('Date'.equals(col.getJavaType())) { %>\
+        st.bind${col.bindType}(index, fromDate(get${col.javaName}()));
+<% } else { %>\
+        st.bind${col.bindType}(index, get${col.javaName}());
+<% } %>\
+    }
+<% } %>\
+    //------------------------------------------------------------
+    public ${className} fromCursor(Cursor cursor) {
+<% for (def col : table.columns) { %>\
+<% if ('boolean'.equals(col.getJavaType())) { %>
+        set${col.javaName}(cursor.get${col.bindType}(cursor.getColumnIndex("${col.name}")) != 0);
+<% } else if ('int'.equals(col.getJavaType())) { %>
+        set${col.javaName}((int)cursor.get${col.bindType}(cursor.getColumnIndex("${col.name}"))));
+<% } else if ('float'.equals(col.getJavaType())) { %>
+        set${col.javaName}((float)cursor.get${col.bindType}(cursor.getColumnIndex("${col.name}"))));
+<% } else if ('Date'.equals(col.getJavaType())) { %>
+        set${col.javaName}(toDate(cursor.get${col.bindType}(cursor.getColumnIndex("${col.name}"))));
+<% } else { %>
+        set${col.javaName}(cursor.get${col.bindType}(cursor.getColumnIndex("${col.name}")));
+<% } %>\
+<% } %>\
+        return this;
+    }
+
+    private static final String DATETIME_FMT = "yyyy/MM/dd_HH:mm:ss.SSS";
+    private String toDate(String dateStr) {
+        SimpleDateFormat sdf = new SimpleDateFormat(DATETIME_FMT, Timezone.GMT);
+        try {
+            return sdf.parse(dateStr);
+        } catch (ParseException e) {
+            return null;
+        }
+    }
+    private String fromDate(Date date) {
+        SimpleDateFormat sdf = new SimpleDateFormat(DATETIME_FMT, Timezone.GMT);
+        try {
+            return sdf.format(date);
+        } catch (FormatException e) {
+            return null;
+        }
+    }
+    public String toString() {
+        StringBuilder sbuf = new StringBuilder();
+        sbuf.append("${className}[");
+<% for (def col : table.columns) { %>\
+        sbuf.append("${col.name}=").append(this.get${col.javaName}()).append(',');
+<% } %>\
+        sbuf.append("]");
+        return sbuf.toString();
+    }
+}
+''';
+
+    def TEMPLATE_DAO = '''
+package ${helperPackage};
+import java.util.Date;
+
+public class ${className} {
+    private final SQLiteDatabase db;
+
+    public ${className}(SQLiteDatabase db) {
+        this.db = db;
+    }
+
+    public void doCreateTable(SQLiteDatabase db) {
+        onUpgrade(db, -1,0);
+    }
+    public void doUpgrateTable(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion < ${table.getMinVersion()}) {
+            db.execSQL(getCreateTableDDL());
+        }
+<% for (def ver : table.upgrateVersions) { %>\
+        if (oldVersion < ${ver}) {
+<% for (def col : table.getColumns(ver)) { %>\
+            db.execSQL("ALTER TABLE ${table.name} ADD COLUMN ${col.name} ${col.mergedConstraint};");
+<% } %>\
+        }
+<% } %>\
+    }
+
+    public String getCreateTableDDL() {
+        StringBuilder sbuf = new StringBuilder();
+        sbuf.append("CREATE TABLE ${table.name} (");
+<% for (def col : table.columns) { %>\
+<% if (col.isMinVersion()) { %>\
+        sbuf.append("${col.name} ${col.mergedConstraint},");
+<% } %>\
+<% } %>\
+        sbuf.setLength(sbuf.length()-1);
+        sbuf.append(");");
+        return sbuf.toString();
+    }
+
+    private SQLiteStatement mStatementInsert =  db.compileStatement(
+        "INSERT INTO ${table.name}(${table.getColumnNames(",")}) VALUES(${table.getColumnParams(","));"
+    );
+
+    public long insert(${dtoClassName} dto) {
+        mStatementInsert.clearBindings();
+        int n = 0;
+<% for (def col : table.columns) { %>\
+        dto.bind${col.javaName}(mStatementInsert, n++);
+<% } %>\
+        try {
+            return mStatementInsert.executeInsert();
+        } finally {
+            mStatementInsert.close();
+        }
+    }
+
+    private SQLiteStatement mStatementUpdate =  db.compileStatement(
+        "UPDATE ${table.name} "
+            +" SET ${table.getColumnSets()"
+            +" WHERE ${table.getWherePKey()};"
+    );
+
+    public int update(${dtoClassName} dto) {
+        mStatementInsert.clearBindings();
+        int n = 0;
+<% for (def col : table.columns) { %>\
+        dto.bind${col.javaName}(mStatementInsert, n++);
+<% } %>\
+        dto.bind${table.getPKeyColomn().javaName}(mStatementInsert, n++);
+        try {
+            return mStatementUpdate.executeUpdateDelete();
+        } finally {
+            mStatementUpdate.close();
+        }
+    }
+
+    private SQLiteStatement mStatementDelete =  db.compileStatement(
+        "DELETE FROM ${table.name} WHERE ${table.getPKeyColomn().name}=?;"
+    );
+
+    public int delete(${dtoClassName} dto) {
+        dto.bind${table.getPKeyColomn().javaName}(mStatementInsert, 0);
+        try {
+            return mStatementDelete.executeUpdateDelete();
+        } finally {
+            mStatementDelete.close();
+        }
+    }
+
+    private SQLiteStatement mStatementGet =  db.compileStatement(
+        "SELECT FROM ${table.name} WHERE ${table.getPKeyColomn().name}=?;"
+    );
+
+    public ${dtoClassName} get(${table.getPKeyColumn().jtype} key) {
+        mStatementGet.bind${table.getPKeyColomn().bindType}(0, key);
+        try {
+            Cursor cursor = mStatementGet.executeQuery();
+            try {
+                if (cursor.moveToNext()) {
+                    ${dtoClassName} dto = new ${dtoClassName}().fromCursor(cursor);
+                    return dto;
+                }
+                return null;
+            } finally {
+                cursor.close();
+            }
+        } finally {
+            mStatementGet.close();
+        }
+    }
+
+    public List<${dtoClassName}> selectAll() {
+        String sql = "SELECT FROM ${table.name}";
+        SQLiteStatement statement = new SQLiteStatement(db, sql, null);
+        try {
+            List<${dtoClassName}> list = new ArrayList<${dtoClassName}>();
+            Cursor cursor = statement.executeQuery();
+            try {
+                while (cursor.moveToNext()) {
+                    ${dtoClassName} dto = new ${dtoClassName}().fromCursor(cursor);
+                    list.add(dto);
+                }
+                return list;
+            } finally {
+                cursor.close();
+            }
+        } finally {
+            statement.close();
+        }
+    }
+}
+''';
+
+}
